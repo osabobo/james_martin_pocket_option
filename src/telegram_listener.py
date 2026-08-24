@@ -144,7 +144,7 @@ async def main():
     api_hash = os.environ["TELEGRAM_API_HASH"]
     source = os.environ["TELEGRAM_SOURCE"].strip()
 
-    session_str = os.getenv("TELEGRAM_SESSION_STRING")
+    session_str = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
     if session_str:
         client = TelegramClient(StringSession(session_str), api_id, api_hash)
     else:
