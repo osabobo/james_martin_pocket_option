@@ -2,10 +2,19 @@ import os
 import json
 import asyncio
 import time
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
+
+try:
+    import undetected_chromedriver as uc
+    from selenium.webdriver.common.by import By
+    HAS_CHROME = True
+except ImportError:
+    HAS_CHROME = False
 
 async def get_fresh_ssid() -> str | None:
+    if not HAS_CHROME:
+        print("[SESSION] Chrome/Selenium not available in this environment. Cannot auto-refresh SSID.")
+        print("[SESSION] Please update POCKET_OPTION_SSID manually in your environment variables.")
+        return None
     # Run the synchronous Selenium code in a thread so it doesn't block the async loop
     return await asyncio.to_thread(_get_fresh_ssid_sync)
 

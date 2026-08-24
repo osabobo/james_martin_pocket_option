@@ -285,7 +285,17 @@ async def main():
     # Pre-connect the broker so it fetches the SSID immediately
     if hasattr(executor, "connect"):
         print("Initializing broker connection...")
-        await executor.connect()
+        for attempt in range(1, 6):
+            try:
+                await executor.connect()
+                break
+            except Exception as e:
+                print(f"[WARNING] Broker connection attempt {attempt}/5 failed: {e}")
+                if attempt < 5:
+                    print(f"[WARNING] Retrying in 30 seconds...")
+                    await asyncio.sleep(30)
+                else:
+                    print("[WARNING] Could not connect to broker after 5 attempts. Bot will try to reconnect when a signal arrives.")
         
     print("Telegram listener running in DEMO mode. Waiting for signals...")
     await client.run_until_disconnected()
