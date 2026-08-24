@@ -1,0 +1,8 @@
+pydantic>=2.8
+python-dotenv>=1.0
+fastmcp>=2.0
+telethon>=1.36
+pytest>=8.0
+pocket-option==0.2.8
+aiohttp>=3.8.0
+gspread>=6.0.0

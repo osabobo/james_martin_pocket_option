@@ -1,0 +1,25 @@
+# Environments
+.env
+.venv313/
+venv/
+env/
+.venv/
+agent/
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/
+.agents/
+
+# App-specific
+chrome_profile/
+playwright_profile/
+*.session
+*.log
+websocket_debug.log
+perf_logs_dump.txt
+scratch_martingale.csv
+.pytest_cache/
+src/test_history.py
