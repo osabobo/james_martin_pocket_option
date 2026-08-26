@@ -58,8 +58,11 @@ class PocketOptionDemoExecutor(TradeExecutor):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
             "Origin": "https://pocketoption.com"
         }
+        trading_mode = os.getenv("TRADING_MODE", "demo").lower()
+        ws_url = Regions.EUROPA.value if trading_mode == "live" else Regions.DEMO.value
+        
         await self.client.connect(
-            url=Regions.DEMO.value, 
+            url=ws_url, 
             auth=None, 
             headers=headers
         )
