@@ -10,8 +10,6 @@ from .executor import TradeExecutor
 
 class PocketOptionDemoExecutor(TradeExecutor):
     def __init__(self):
-        if os.getenv("TRADING_MODE", "demo").lower() != "demo":
-            raise RuntimeError("Demo connector refuses non-demo mode.")
         self.ssid = os.getenv("POCKET_OPTION_SSID")
         self.uid = os.getenv("POCKET_OPTION_UID")
         self.platform = os.getenv("POCKET_OPTION_PLATFORM", "1")
@@ -51,7 +49,7 @@ class PocketOptionDemoExecutor(TradeExecutor):
         auth_data = AuthorizationData(
             session=self.ssid,
             uid=int(self.uid) if self.uid else 0,
-            isDemo=True,
+            isDemo=(os.getenv("TRADING_MODE", "demo").lower() == "demo"),
             isFastHistory=True,
             isOptimized=True,
             platform=int(self.platform) if self.platform else 2,

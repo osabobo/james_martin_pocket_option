@@ -16,6 +16,3 @@ class Settings:
     max_martingale_steps: int = int(os.getenv("MAX_MARTINGALE_STEPS", "2"))
 
 settings = Settings()
-
-if settings.trading_mode != "demo":
-    raise RuntimeError("This scaffold is demo-only.")
