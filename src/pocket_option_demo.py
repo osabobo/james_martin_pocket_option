@@ -252,7 +252,9 @@ class PocketOptionDemoExecutor(TradeExecutor):
         
         # Poll loop: wait for the close_event from the websocket.
         elapsed = 0
-        poll_interval = 2
+        poll_interval = 1
+        trade_duration = timeout - 60  # The actual expiry duration
+        
         while elapsed < timeout:
             if custom_close_event.is_set():
                 break
@@ -262,11 +264,20 @@ class PocketOptionDemoExecutor(TradeExecutor):
                 print(f"[TRADE-RESULT] Socket disconnected for {trade_id}. Attempting reconnect...")
                 try:
                     await self.connect()
-                    # After reconnect, wait a bit for sync events to process
-                    await asyncio.sleep(5)
-                    elapsed += 5
+                    await asyncio.sleep(2)
+                    elapsed += 2
                 except Exception as e:
                     print(f"[TRADE-RESULT] Reconnect failed: {e}")
+            
+            # If we've reached the exact expiry time and haven't gotten the close event yet,
+            # aggressively ask the server for the closed deals history so we don't delay the martingale.
+            if elapsed >= trade_duration:
+                if self.client and getattr(self.client.sio, 'connected', False):
+                    try:
+                        await self.client.sio.emit("updateHistoryNew", {"_placeholder": True, "num": 0})
+                        await self.client.sio.emit("updateClosedDeals", {"_placeholder": True, "num": 0})
+                    except Exception:
+                        pass
             
             # Check deals_storage fallback, but only consider it closed if we have a real close_price
             # deal.closed is True even for open deals because close_timestamp is pre-populated!
