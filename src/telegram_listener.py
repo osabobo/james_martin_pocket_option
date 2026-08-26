@@ -70,10 +70,8 @@ async def execute_with_martingale(executor, risk, signal, max_martingale=2, mult
     current_amount = request.amount
     mg_count = 0
     
-    # Use signal's max_martingale if provided, but cap it to user's max preference (2).
-    # If signal doesn't specify (0), default to the user's preference.
-    allowed_mgs = signal.max_martingale if signal.max_martingale > 0 else max_martingale
-    allowed_mgs = min(allowed_mgs, max_martingale)
+    # Always use the user's maximum martingale preference from Render, overriding the signal.
+    allowed_mgs = max_martingale
     
     while mg_count <= allowed_mgs:
         print(f"[MARTINGALE] Executing trade (MG step {mg_count}/{allowed_mgs}): {signal.asset} {signal.direction.value} {signal.expiry_seconds}s ${current_amount:.2f}")
@@ -197,11 +195,15 @@ async def main():
             if not is_match:
                 return
 
+        if not event.raw_text:
+            print("[DEBUG] Received an empty text message (likely an image, sticker, or service message). Ignoring.")
+            return
+            
         print(f"[DEBUG] Received message in target chat: {repr(event.raw_text[:50])}...")
         
-        signal = parse_signal(event.raw_text or "", event.id)
+        signal = parse_signal(event.raw_text, event.id)
         if not signal:
-            print("[DEBUG] Failed to parse message as a valid signal.")
+            print("[DEBUG] Failed to parse text message as a valid signal.")
             return
             
         destination = os.environ.get("FORWARD_DESTINATION")
