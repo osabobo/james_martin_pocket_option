@@ -270,8 +270,9 @@ class PocketOptionDemoExecutor(TradeExecutor):
                     print(f"[TRADE-RESULT] Reconnect failed: {e}")
             
             # If we've reached the exact expiry time and haven't gotten the close event yet,
-            # aggressively ask the server for the closed deals history so we don't delay the martingale.
-            if elapsed >= trade_duration:
+            # ask the server for the closed deals history so we don't delay the martingale.
+            # We use elapsed % 10 == 0 to avoid spamming the server every second and getting rate-limited.
+            if elapsed >= trade_duration and int(elapsed) % 10 == 0:
                 if self.client and getattr(self.client.sio, 'connected', False):
                     try:
                         await self.client.sio.emit("updateHistoryNew", {"_placeholder": True, "num": 0})
