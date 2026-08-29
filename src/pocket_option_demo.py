@@ -15,11 +15,39 @@ class PocketOptionDemoExecutor(TradeExecutor):
         self.platform = os.getenv("POCKET_OPTION_PLATFORM", "1")
         self.client = None
         self.deals_storage = None
+        self._pending_close_listener = None
 
     async def connect(self):
         await self._try_connect()
     
-    async def _try_connect(self, force_fresh=False):
+    async def reconnect(self, pending_close_listener=None):
+        if not self.client:
+            return await self.connect()
+
+        print("[RECONNECT] Attempting lightweight reconnect to preserve storage...")
+        old_storage = self.deals_storage
+        old_listener = pending_close_listener or self._pending_close_listener
+        
+        try:
+            await self.client.disconnect()
+        except Exception:
+            pass
+            
+        await self._try_connect(force_fresh=False, create_new_storage=False)
+        
+        if old_storage:
+            self.deals_storage = old_storage
+            self.deals_storage.client = self.client
+            self.client.on.success_open_deal(self.deals_storage._on_success_open_deal)
+            self.client.on.success_close_deal(self.deals_storage._on_success_close_deal)
+            self.client.on.update_opened_deals(self.deals_storage.add_or_update_deal_bulk)
+            self.client.on.update_closed_deals(self.deals_storage.add_or_update_deal_bulk)
+            
+        if old_listener:
+            self._pending_close_listener = old_listener
+            self.client.on.success_close_deal(old_listener)
+
+    async def _try_connect(self, force_fresh=False, create_new_storage=True):
         if force_fresh or not self.ssid:
             print("Fetching fresh SSID via automated login...")
             from .session_manager import get_fresh_ssid
@@ -107,11 +135,12 @@ class PocketOptionDemoExecutor(TradeExecutor):
                     pass
                 self.client = None
                 self.ssid = None
-                return await self._try_connect(force_fresh=True)
+                return await self._try_connect(force_fresh=True, create_new_storage=create_new_storage)
             else:
                 print("[WARNING] Authorization failed - continuing anyway, trades may fail.")
         
-        self.deals_storage = MemoryDealsStorage(self.client)
+        if create_new_storage:
+            self.deals_storage = MemoryDealsStorage(self.client)
 
     def _resolve_asset(self, asset_str: str):
         """Map a signal asset string like 'USDCHF-OTC' to the SDK's Asset enum."""
@@ -248,6 +277,7 @@ class PocketOptionDemoExecutor(TradeExecutor):
                     custom_close_event.set()
         
         # Subscribe to the event
+        self._pending_close_listener = on_close_deal
         unsub = self.client.on.success_close_deal(on_close_deal)
         
         # Poll loop: wait for the close_event from the websocket.
@@ -263,9 +293,9 @@ class PocketOptionDemoExecutor(TradeExecutor):
             if self.client and not getattr(self.client.sio, 'connected', True):
                 print(f"[TRADE-RESULT] Socket disconnected for {trade_id}. Attempting reconnect...")
                 try:
-                    await self.connect()
-                    await asyncio.sleep(2)
-                    elapsed += 2
+                    await self.reconnect(on_close_deal)
+                    await asyncio.sleep(3)
+                    elapsed += 3
                 except Exception as e:
                     print(f"[TRADE-RESULT] Reconnect failed: {e}")
             
@@ -328,10 +358,20 @@ class PocketOptionDemoExecutor(TradeExecutor):
         # If we're here, either the socket died or we timed out. We MUST NOT default to LOSS!
         # If we blindly return LOSS, it causes runaway Martingale trades on network issues.
         # As a final resort, check deals_storage one last time.
-        deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
-        if deal and getattr(deal, 'close_price', 0.0) not in (0.0, None):
-            print(f"[TRADE-RESULT] Deal {trade_id} found closed after timeout.")
-            return _make_result(deal)
+        
+        for attempt in range(3):
+            deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
+            if deal and getattr(deal, 'close_price', 0.0) not in (0.0, None):
+                print(f"[TRADE-RESULT] Deal {trade_id} found closed after timeout on attempt {attempt+1}.")
+                return _make_result(deal)
+            
+            if attempt < 2:
+                print(f"[TRADE-RESULT] Checking deal {trade_id} failed. Trying reconnect...")
+                try:
+                    await self.reconnect(on_close_deal)
+                    await asyncio.sleep(5)
+                except Exception:
+                    pass
             
         print(f"[TRADE-RESULT] WARNING: Could not determine result for {trade_id} (elapsed={elapsed}s). Returning UNKNOWN.")
         return TradeResult(
