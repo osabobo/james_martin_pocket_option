@@ -418,12 +418,14 @@ class PocketOptionDemoExecutor(TradeExecutor):
             # Check deals_storage fallback. A deal is truly closed when close_price is set
             # OR when profit is non-None (broker sometimes sets profit without close_price).
             deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
-            if deal and getattr(deal, 'closed', False):
+            if deal:
                 close_price = getattr(deal, 'close_price', 0.0)
-                profit = getattr(deal, 'profit', None)
-                print(f"[TRADE-RESULT] Deal {trade_id} found fully closed in deals_storage (close_price={close_price}, profit={profit}).")
-                _unsub_all()
-                return _make_result(deal)
+                # An open deal has close_price=0.0. It only gets a real price when it finishes.
+                if close_price not in (0.0, None):
+                    profit = getattr(deal, 'profit', None)
+                    print(f"[TRADE-RESULT] Deal {trade_id} found fully closed in deals_storage (close_price={close_price}, profit={profit}).")
+                    _unsub_all()
+                    return _make_result(deal)
 
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
@@ -468,9 +470,11 @@ class PocketOptionDemoExecutor(TradeExecutor):
         # Final recovery: reconnect and actively pull history up to 3 times.
         for attempt in range(3):
             deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
-            if deal and getattr(deal, 'closed', False):
-                print(f"[TRADE-RESULT] Deal {trade_id} found closed after timeout on attempt {attempt+1}.")
-                return _make_result(deal)
+            if deal:
+                close_price = getattr(deal, 'close_price', 0.0)
+                if close_price not in (0.0, None):
+                    print(f"[TRADE-RESULT] Deal {trade_id} found closed after timeout on attempt {attempt+1}.")
+                    return _make_result(deal)
             
             if attempt < 2:
                 print(f"[TRADE-RESULT] Checking deal {trade_id} failed. Trying reconnect...")
