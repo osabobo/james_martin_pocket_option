@@ -74,14 +74,6 @@ class PocketOptionDemoExecutor(TradeExecutor):
                 if deal and getattr(deal, 'close_price', 0.0) not in (0.0, None):
                     print(f"[TRADE-RESULT] Deal {deal_uuid} found in closed history (close_price={deal.close_price}).")
                     return True
-                # Also treat a non-zero profit as proof of closure
-                if deal and getattr(deal, 'profit', None) is not None:
-                    try:
-                        if float(deal.profit) != 0.0:
-                            print(f"[TRADE-RESULT] Deal {deal_uuid} found in closed history (profit={deal.profit}).")
-                            return True
-                    except (ValueError, TypeError):
-                        pass
             except Exception:
                 pass
             await asyncio.sleep(0.5)
@@ -488,7 +480,7 @@ class PocketOptionDemoExecutor(TradeExecutor):
                     found = await self._fetch_closed_history(deal_uuid, custom_close_event, timeout=8.0)
                     if found or custom_close_event.is_set():
                         deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
-                        if deal:
+                        if deal and getattr(deal, 'close_price', 0.0) not in (0.0, None):
                             return _make_result(deal)
                 except Exception:
                     await asyncio.sleep(5)
