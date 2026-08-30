@@ -47,6 +47,47 @@ class PocketOptionDemoExecutor(TradeExecutor):
             self._pending_close_listener = old_listener
             self.client.on.success_close_deal(old_listener)
 
+    async def _fetch_closed_history(self, deal_uuid, close_event: "asyncio.Event", timeout: float = 8.0):
+        """Emit history-fetch requests to the server and wait up to `timeout` seconds
+        for the `updateClosedDeals` bulk sync to arrive and populate deals_storage.
+        Returns True if the target deal was found with a valid close_price."""
+        if not (self.client and getattr(self.client.sio, 'connected', False)):
+            return False
+        
+        print(f"[TRADE-RESULT] Fetching closed history from server to find deal {deal_uuid}...")
+        try:
+            await self.client.sio.emit("updateHistoryNew", {"_placeholder": True, "num": 0})
+            await self.client.sio.emit("updateClosedDeals", {"_placeholder": True, "num": 0})
+        except Exception as e:
+            print(f"[TRADE-RESULT] History fetch emit failed: {e}")
+            return False
+        
+        # Wait for the server response to be processed into deals_storage
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            # Check if the bulk event listener already found it
+            if close_event.is_set():
+                return True
+            # Check deals_storage directly
+            try:
+                deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
+                if deal and getattr(deal, 'close_price', 0.0) not in (0.0, None):
+                    print(f"[TRADE-RESULT] Deal {deal_uuid} found in closed history (close_price={deal.close_price}).")
+                    return True
+                # Also treat a non-zero profit as proof of closure
+                if deal and getattr(deal, 'profit', None) is not None:
+                    try:
+                        if float(deal.profit) != 0.0:
+                            print(f"[TRADE-RESULT] Deal {deal_uuid} found in closed history (profit={deal.profit}).")
+                            return True
+                    except (ValueError, TypeError):
+                        pass
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+        
+        return False
+
     async def _try_connect(self, force_fresh=False, create_new_storage=True):
         if force_fresh or not self.ssid:
             print("Fetching fresh SSID via automated login...")
@@ -261,12 +302,12 @@ class PocketOptionDemoExecutor(TradeExecutor):
                 pnl=float(realized_profit) if realized_profit is not None else None,
             )
         
-        # Register a custom listener to capture the raw SuccessCloseDealEvent.
-        # The broker sends the ACTUAL realized profit for the deal at the top level of this event,
-        # which avoids the issue of the Deal object containing `close_price=0.0`.
+        # --- Shared close event and profit capture ---
+        # Triggered by EITHER the real-time successcloseOrder event OR the bulk updateClosedDeals sync.
         actual_profit = None
         custom_close_event = asyncio.Event()
-        
+
+        # Listener 1: real-time per-deal close event (fires when trade closes normally)
         def on_close_deal(event):
             print(f"[TRADE-RESULT-DEBUG] Received successcloseOrder event. Profit: {event.profit}. Deals in event: {len(event.deals)}")
             for closed_deal in event.deals:
@@ -275,56 +316,120 @@ class PocketOptionDemoExecutor(TradeExecutor):
                     nonlocal actual_profit
                     actual_profit = event.profit
                     custom_close_event.set()
+
+        # Listener 2: bulk history sync (fires after every reconnect via updateClosedDeals)
+        # This is the key fix: after a WS drop the server sends updateClosedDeals (bulk),
+        # NOT successcloseOrder, so we MUST also scan the bulk payload for our deal.
+        def on_bulk_closed_deals(event):
+            deals_list = getattr(event, 'deals', []) or []
+            for closed_deal in deals_list:
+                if getattr(closed_deal, 'id', None) == deal_uuid:
+                    close_price = getattr(closed_deal, 'close_price', 0.0)
+                    profit = getattr(closed_deal, 'profit', None)
+                    # Only treat as truly closed if we have a non-zero close_price or a profit figure
+                    has_close_price = close_price not in (0.0, None)
+                    has_profit = profit is not None
+                    if has_close_price or has_profit:
+                        nonlocal actual_profit
+                        if profit is not None:
+                            try:
+                                actual_profit = float(profit)
+                            except (ValueError, TypeError):
+                                pass
+                        print(f"[TRADE-RESULT-DEBUG] Found deal {deal_uuid} in bulk updateClosedDeals (close_price={close_price}, profit={profit}).")
+                        custom_close_event.set()
+                        break
         
-        # Subscribe to the event
+        # Subscribe to both events
         self._pending_close_listener = on_close_deal
-        unsub = self.client.on.success_close_deal(on_close_deal)
+        unsub_realtime = self.client.on.success_close_deal(on_close_deal)
+        # Register bulk listener — use update_closed_deals if available, otherwise fall back to sio.on
+        unsub_bulk = None
+        try:
+            unsub_bulk = self.client.on.update_closed_deals(on_bulk_closed_deals)
+        except Exception:
+            try:
+                self.client.sio.on("updateClosedDeals", on_bulk_closed_deals)
+            except Exception:
+                pass
+        
+        def _unsub_all():
+            try:
+                if unsub_realtime:
+                    unsub_realtime()
+            except Exception:
+                pass
+            try:
+                if unsub_bulk:
+                    unsub_bulk()
+            except Exception:
+                pass
         
         # Poll loop: wait for the close_event from the websocket.
         elapsed = 0
         poll_interval = 1
         trade_duration = timeout - 60  # The actual expiry duration
+        last_history_fetch = -999  # Track when we last fetched history to avoid spamming
         
         while elapsed < timeout:
             if custom_close_event.is_set():
                 break
                 
-            # If socket drops, try to reconnect to trigger updateClosedDeals sync
+            # If socket drops, reconnect then immediately fetch closed history.
+            # This is the primary fix: after reconnect the server sends updateClosedDeals
+            # (bulk sync) rather than successcloseOrder, so we actively request it.
             if self.client and not getattr(self.client.sio, 'connected', True):
                 print(f"[TRADE-RESULT] Socket disconnected for {trade_id}. Attempting reconnect...")
                 try:
                     await self.reconnect(on_close_deal)
-                    await asyncio.sleep(3)
-                    elapsed += 3
+                    # Re-register bulk listener on the new client connection
+                    try:
+                        self.client.on.update_closed_deals(on_bulk_closed_deals)
+                    except Exception:
+                        try:
+                            self.client.sio.on("updateClosedDeals", on_bulk_closed_deals)
+                        except Exception:
+                            pass
+                    # Immediately fetch closed history — don't wait for next polling tick
+                    found = await self._fetch_closed_history(deal_uuid, custom_close_event, timeout=8.0)
+                    elapsed += 10  # Account for reconnect + fetch time
+                    last_history_fetch = elapsed
+                    if found or custom_close_event.is_set():
+                        break
                 except Exception as e:
                     print(f"[TRADE-RESULT] Reconnect failed: {e}")
+                    await asyncio.sleep(3)
+                    elapsed += 3
             
-            # If we've reached the exact expiry time and haven't gotten the close event yet,
-            # ask the server for the closed deals history so we don't delay the martingale.
-            # We use elapsed % 10 == 0 to avoid spamming the server every second and getting rate-limited.
-            if elapsed >= trade_duration and int(elapsed) % 10 == 0:
+            # Periodically fetch closed history after the trade should have expired.
+            # Reduced from every 10s to every 5s for faster recovery.
+            if elapsed >= trade_duration and (elapsed - last_history_fetch) >= 5:
                 if self.client and getattr(self.client.sio, 'connected', False):
                     try:
                         await self.client.sio.emit("updateHistoryNew", {"_placeholder": True, "num": 0})
                         await self.client.sio.emit("updateClosedDeals", {"_placeholder": True, "num": 0})
+                        last_history_fetch = elapsed
                     except Exception:
                         pass
             
-            # Check deals_storage fallback, but only consider it closed if we have a real close_price
-            # deal.closed is True even for open deals because close_timestamp is pre-populated!
+            # Check deals_storage fallback. A deal is truly closed when close_price is set
+            # OR when profit is non-None (broker sometimes sets profit without close_price).
             deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
-            if deal and getattr(deal, 'close_price', 0.0) not in (0.0, None):
-                print(f"[TRADE-RESULT] Deal {trade_id} found fully closed in deals_storage fallback.")
-                if unsub:
-                    unsub()
-                return _make_result(deal)
+            if deal:
+                close_price = getattr(deal, 'close_price', 0.0)
+                profit = getattr(deal, 'profit', None)
+                has_real_close = close_price not in (0.0, None)
+                has_profit = profit is not None and profit != 0.0
+                if has_real_close or has_profit:
+                    print(f"[TRADE-RESULT] Deal {trade_id} found fully closed in deals_storage (close_price={close_price}, profit={profit}).")
+                    _unsub_all()
+                    return _make_result(deal)
 
             await asyncio.sleep(poll_interval)
             elapsed += poll_interval
         
-        # Unsubscribe
-        if unsub:
-            unsub()
+        # Unsubscribe all listeners
+        _unsub_all()
             
         if custom_close_event.is_set():
             deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
@@ -335,43 +440,59 @@ class PocketOptionDemoExecutor(TradeExecutor):
                     status = "LOSS"
                 elif actual_profit > 0.0:
                     status = "WIN"
+                elif actual_profit < 0.0:
+                    status = "LOSS"
             
-            if status == "LOSS":
-                pnl = -float(deal.amount)
-            elif status == "WIN":
-                pnl = float(actual_profit) - float(deal.amount) # Realized net profit (or just use actual_profit if it's the net. Let's assume actual_profit is total payout, so net = payout - stake. Wait! PocketOption usually sends net profit or total payout? Actually the user said 'payout'. If $10 yields $19.2, net is $9.2. Let's just use float(actual_profit) for now or expected_profit.)
-                # Wait, if expected_profit = 9.2 (net), and actual_profit = 19.2 (gross), I should use expected_profit for WIN.
-                # Let's just use expected_profit if WIN, -deal.amount if LOSS.
-                pnl = float(getattr(deal, 'profit', 0.0))
+            if deal:
+                if status == "LOSS":
+                    pnl = -float(deal.amount)
+                elif status == "WIN":
+                    # Use deal.profit (net) if available, otherwise fall back to actual_profit
+                    pnl = float(getattr(deal, 'profit', actual_profit or 0.0))
+                else:
+                    pnl = 0.0
             else:
-                pnl = 0.0
+                pnl = actual_profit if actual_profit and actual_profit > 0 else 0.0
                 
-            print(f"[TRADE-RESULT] Deal {trade_id} closed: status={status}, actual_event_profit={actual_profit}, expected_profit={getattr(deal, 'profit', None)}")
+            print(f"[TRADE-RESULT] Deal {trade_id} closed: status={status}, actual_event_profit={actual_profit}, expected_profit={getattr(deal, 'profit', None) if deal else None}")
             return TradeResult(
                 accepted=True,
                 trade_id=trade_id,
                 status=status,
-                result=str(deal),
+                result=str(deal) if deal else "",
                 pnl=pnl,
             )
         
         # If we're here, either the socket died or we timed out. We MUST NOT default to LOSS!
         # If we blindly return LOSS, it causes runaway Martingale trades on network issues.
-        # As a final resort, check deals_storage one last time.
-        
+        # Final recovery: reconnect and actively pull history up to 3 times.
         for attempt in range(3):
             deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
-            if deal and getattr(deal, 'close_price', 0.0) not in (0.0, None):
-                print(f"[TRADE-RESULT] Deal {trade_id} found closed after timeout on attempt {attempt+1}.")
-                return _make_result(deal)
+            if deal:
+                close_price = getattr(deal, 'close_price', 0.0)
+                profit = getattr(deal, 'profit', None)
+                has_real_close = close_price not in (0.0, None)
+                has_profit = profit is not None and profit != 0.0
+                if has_real_close or has_profit:
+                    print(f"[TRADE-RESULT] Deal {trade_id} found closed after timeout on attempt {attempt+1}.")
+                    return _make_result(deal)
             
             if attempt < 2:
                 print(f"[TRADE-RESULT] Checking deal {trade_id} failed. Trying reconnect...")
                 try:
                     await self.reconnect(on_close_deal)
-                    await asyncio.sleep(5)
+                    try:
+                        self.client.on.update_closed_deals(on_bulk_closed_deals)
+                    except Exception:
+                        pass
+                    # Actively fetch history after reconnect
+                    found = await self._fetch_closed_history(deal_uuid, custom_close_event, timeout=8.0)
+                    if found or custom_close_event.is_set():
+                        deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
+                        if deal:
+                            return _make_result(deal)
                 except Exception:
-                    pass
+                    await asyncio.sleep(5)
             
         print(f"[TRADE-RESULT] WARNING: Could not determine result for {trade_id} (elapsed={elapsed}s). Returning UNKNOWN.")
         return TradeResult(
