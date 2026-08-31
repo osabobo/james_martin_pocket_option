@@ -13,7 +13,7 @@ class Signal(BaseModel):
     expiry_seconds: int = Field(gt=0, le=3600)
     signal_time: str | None = None
     timezone: str | None = None
-    max_martingale: int = Field(default=0, ge=0, le=2)
+    max_martingale: int = Field(default=0, ge=0, le=5)
     telegram_message_id: str | None = None
     received_at: datetime
 
