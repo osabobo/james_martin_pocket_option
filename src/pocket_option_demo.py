@@ -5,16 +5,75 @@ start unless TRADING_MODE=demo.
 """
 import os
 import asyncio
+import uuid
 from .models import TradeRequest, TradeResult
 from .executor import TradeExecutor
 
+# Fallback storage used when pocket_option SDK is unavailable
+class DummyDealStorage:
+    """Minimal async storage mimicking the SDK's interface for tests.
+    Provides open_deal and get_deal methods that return simple dummy deal objects.
+    """
+    def __init__(self):
+        self._deals = {}
+
+    async def open_deal(self, *args, **kwargs):
+        class DummyDeal:
+            def __init__(self, deal_id):
+                self.id = deal_id
+                self.asset = kwargs.get('asset')
+                self.amount = kwargs.get('amount')
+                self.command = type('Cmd', (), {'name': kwargs.get('action')})()
+                self.open_price = 1.0
+                self.close_price = None
+                self.profit = None
+        deal_id = uuid.uuid4()
+        deal = DummyDeal(deal_id)
+        self._deals[deal_id] = deal
+        return deal
+
+    async def get_deal(self, deal_id):
+        return self._deals.get(deal_id)
+
+# Optional SDK import – use a dummy placeholder if not installed
+try:
+    from pocket_option import PocketOptionClient
+    from pocket_option.models import AuthorizationData, Asset, DealAction
+    from pocket_option.constants import Regions
+    from pocket_option.contrib.deals import MemoryDealsStorage
+except ImportError:  # pragma: no cover
+    PocketOptionClient = None
+    AuthorizationData = None
+    Regions = None
+    MemoryDealsStorage = None
+    # Provide dummy enums/classes when SDK missing
+    from enum import Enum
+    class DealAction(Enum):
+        CALL = "CALL"
+        PUT = "PUT"
+    class Asset:
+        def __init__(self, name):
+            self.name = name
+        def __repr__(self):
+            return f"Asset({self.name})"
+    print("[INFO] pocket_option SDK not available – running in fallback mode.")
+
+
+
 class PocketOptionDemoExecutor(TradeExecutor):
     def __init__(self):
+        if os.getenv("TRADING_MODE", "demo").lower() != "demo":
+            raise RuntimeError("PocketOptionDemoExecutor can only run in demo mode. TRADING_MODE must be 'demo'.")
         self.ssid = os.getenv("POCKET_OPTION_SSID")
         self.uid = os.getenv("POCKET_OPTION_UID")
         self.platform = os.getenv("POCKET_OPTION_PLATFORM", "1")
         self.client = None
-        self.deals_storage = None
+        # Use dummy storage if the official SDK is not installed
+        # Use dummy storage when the official SDK is unavailable
+        if MemoryDealsStorage is None:
+            self.deals_storage = DummyDealStorage()
+        else:
+            self.deals_storage = None
         self._pending_close_listener = None
 
     async def connect(self):
@@ -95,11 +154,14 @@ class PocketOptionDemoExecutor(TradeExecutor):
 
         # The SDK is intentionally imported lazily so the rest of the project
         # can still be tested without a broker session.
-        from pocket_option import PocketOptionClient
-        from pocket_option.models import AuthorizationData
-        from pocket_option.constants import Regions
-        from pocket_option.contrib.deals import MemoryDealsStorage
-        
+        # If the pocket_option SDK is unavailable, use a dummy client and storage
+        if PocketOptionClient is None:
+            print("[INFO] Using dummy PocketOption client for demo/testing.")
+            self.client = None
+            if self.deals_storage is None:
+                self.deals_storage = DummyDealStorage()
+            return
+
         # SDK APIs can change because this is unofficial. Keep this code isolated.
         import logging
         self.client = PocketOptionClient(
@@ -177,7 +239,7 @@ class PocketOptionDemoExecutor(TradeExecutor):
 
     def _resolve_asset(self, asset_str: str):
         """Map a signal asset string like 'USDCHF-OTC' to the SDK's Asset enum."""
-        from pocket_option.models import Asset
+        
         
         # Normalize: "USDCHF-OTC" → "USDCHF_otc", "EURUSD" → "EURUSD"
         normalized = asset_str.replace("-OTC", "_otc").replace("-otc", "_otc").replace("_OTC", "_otc").replace(" ", "_").replace("/", "")
@@ -196,7 +258,7 @@ class PocketOptionDemoExecutor(TradeExecutor):
             print("[INFO] Broker socket disconnected. Reconnecting...")
             await self.connect()
 
-        from pocket_option.models import DealAction
+
         
         asset = self._resolve_asset(request.asset)
         if asset is None:
@@ -337,16 +399,19 @@ class PocketOptionDemoExecutor(TradeExecutor):
         
         # Subscribe to both events
         self._pending_close_listener = on_close_deal
-        unsub_realtime = self.client.on.success_close_deal(on_close_deal)
+        unsub_realtime = None
+        if self.client:
+            unsub_realtime = self.client.on.success_close_deal(on_close_deal)
         # Register bulk listener — use update_closed_deals if available, otherwise fall back to sio.on
         unsub_bulk = None
-        try:
-            unsub_bulk = self.client.on.update_closed_deals(on_bulk_closed_deals)
-        except Exception:
+        if self.client:
             try:
-                self.client.sio.on("updateClosedDeals", on_bulk_closed_deals)
+                unsub_bulk = self.client.on.update_closed_deals(on_bulk_closed_deals)
             except Exception:
-                pass
+                try:
+                    self.client.sio.on("updateClosedDeals", on_bulk_closed_deals)
+                except Exception:
+                    pass
         
         def _unsub_all():
             try:

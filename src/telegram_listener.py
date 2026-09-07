@@ -10,6 +10,10 @@ from .signal_parser import parse_signal
 from .risk import RiskEngine
 from .executor import DemoExecutor
 from .config import settings
+
+# Martingale unknown result handling configuration
+UNKNOWN_RETRY_COUNT: int = int(os.getenv("UNKNOWN_RETRY_COUNT", "3"))
+UNKNOWN_RETRY_BASE_DELAY: int = int(os.getenv("UNKNOWN_RETRY_BASE_DELAY", "20"))
 # Force stdout to UTF-8 to prevent UnicodeEncodeError when printing emojis on Windows
 import sys
 if hasattr(sys.stdout, 'reconfigure'):
@@ -125,32 +129,40 @@ async def execute_with_martingale(executor, risk, signal, max_martingale=2, mult
                 await log_trade_to_sheets(signal, "LOSS", mg_count)
                 break
         elif check_result.status == "UNKNOWN":
-            print(f"[MARTINGALE] Result UNKNOWN. Waiting 20s and retrying once...")
-            await asyncio.sleep(20)
-            retry_result = await executor.get_trade_result(result.trade_id, timeout=30)
-            if retry_result.status in ("WIN", "LOSS", "TIE"):
-                if retry_result.status == "WIN":
-                    print(f"[MARTINGALE] Trade WON! Celebrating and stopping.")
-                    await log_trade_to_sheets(signal, "WIN", mg_count)
-                    break
-                elif retry_result.status == "LOSS":
-                    print(f"[MARTINGALE] Trade result: LOSS.")
-                    if mg_count < allowed_mgs:
-                        mg_count += 1
-                        current_amount *= multiplier
-                        print(f"[MARTINGALE] Initiating Martingale step {mg_count}. New amount: ${current_amount:.2f}")
-                    else:
-                        print(f"[MARTINGALE] Max martingales ({allowed_mgs}) reached. Stopping.")
-                        await log_trade_to_sheets(signal, "LOSS", mg_count)
+            retry_attempt = 0
+            while retry_attempt < UNKNOWN_RETRY_COUNT:
+                delay = UNKNOWN_RETRY_BASE_DELAY * (retry_attempt + 1)
+                print(f"[MARTINGALE] Result UNKNOWN. Waiting {delay}s before retry {retry_attempt + 1}/{UNKNOWN_RETRY_COUNT}...")
+                await asyncio.sleep(delay)
+                retry_result = await executor.get_trade_result(result.trade_id, timeout=30)
+                if retry_result.status in ("WIN", "LOSS", "TIE"):
+                    if retry_result.status == "WIN":
+                        print(f"[MARTINGALE] Trade WON! Celebrating and stopping.")
+                        await log_trade_to_sheets(signal, "WIN", mg_count)
+                        retry_attempt = UNKNOWN_RETRY_COUNT  # exit loop
                         break
-                else: # TIE
-                    print(f"[MARTINGALE] Trade result is TIE. Aborting chain.")
-                    await log_trade_to_sheets(signal, "TIE", mg_count)
-                    break
-            else:
-                print(f"[MARTINGALE] Still UNKNOWN after retry. Aborting chain.")
-                await log_trade_to_sheets(signal, "UNKNOWN", mg_count)
-                break
+                    elif retry_result.status == "LOSS":
+                        print(f"[MARTINGALE] Trade result: LOSS.")
+                        if mg_count < allowed_mgs:
+                            mg_count += 1
+                            current_amount *= multiplier
+                            print(f"[MARTINGALE] Initiating Martingale step {mg_count}. New amount: ${current_amount:.2f}")
+                        else:
+                            print(f"[MARTINGALE] Max martingales ({allowed_mgs}) reached. Stopping.")
+                            await log_trade_to_sheets(signal, "LOSS", mg_count)
+                        retry_attempt = UNKNOWN_RETRY_COUNT
+                        break
+                    else:  # TIE
+                        print(f"[MARTINGALE] Trade result is TIE. Aborting chain.")
+                        await log_trade_to_sheets(signal, "TIE", mg_count)
+                        retry_attempt = UNKNOWN_RETRY_COUNT
+                        break
+                else:
+                    retry_attempt += 1
+                    if retry_attempt >= UNKNOWN_RETRY_COUNT:
+                        print("[MARTINGALE] Still UNKNOWN after retries. Aborting chain.")
+                        await log_trade_to_sheets(signal, "UNKNOWN", mg_count)
+                        break
         else:
             print(f"[MARTINGALE] Trade result is {check_result.status}. Cannot safely proceed with martingale.")
             print("[MARTINGALE] Aborting chain to prevent erroneous trades.")

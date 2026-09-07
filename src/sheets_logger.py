@@ -1,8 +1,13 @@
 import os
 import json
-import gspread
-from datetime import datetime, timezone
 import asyncio
+from datetime import datetime, timezone
+# Optional gspread import – fallback if not installed
+try:
+    import gspread
+except ImportError:  # pragma: no cover
+    gspread = None
+    print("[INFO] gspread not available – Google Sheets logging will be disabled.")
 
 # Superscript mapping for martingale counts
 SUPERSCRIPTS = {0: "⁰", 1: "¹", 2: "²", 3: "³", 4: "⁴", 5: "⁵"}

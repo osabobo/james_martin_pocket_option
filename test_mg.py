@@ -26,4 +26,5 @@ async def main():
     
     await execute_with_martingale(executor, risk, signal, max_martingale=0)
 
-asyncio.run(main())
+if __name__ == '__main__':
+    asyncio.run(main())
