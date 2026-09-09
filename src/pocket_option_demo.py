@@ -317,14 +317,14 @@ class PocketOptionDemoExecutor(TradeExecutor):
                 else:
                     command_str = str(deal.command).lower()
                 
-                if command_str == "call":
+                if command_str in ("call", "0", "dealaction.call"):
                     if deal.close_price > deal.open_price:
                         status = "WIN"
                     elif deal.close_price < deal.open_price:
                         status = "LOSS"
                     else:
                         status = "TIE"
-                elif command_str == "put":
+                elif command_str in ("put", "1", "dealaction.put"):
                     if deal.close_price < deal.open_price:
                         status = "WIN"
                     elif deal.close_price > deal.open_price:
@@ -336,8 +336,10 @@ class PocketOptionDemoExecutor(TradeExecutor):
             if status == "UNKNOWN" and expected_profit is not None:
                 try:
                     p = float(expected_profit)
-                    if p <= 0:
+                    if p < 0:
                         status = "LOSS"
+                    elif p == 0:
+                        status = "LOSS" # Pocket Option often returns profit=0 for loss (payout=0)
                     else:
                         status = "WIN"
                 except (ValueError, TypeError):
@@ -493,6 +495,10 @@ class PocketOptionDemoExecutor(TradeExecutor):
         if custom_close_event.is_set():
             deal = await self.deals_storage.get_deal(deal_id=deal_uuid)
             
+            # If the deal object has been fully populated with close_price, use the robust _make_result logic
+            if deal and getattr(deal, 'close_price', 0.0) not in (0.0, None):
+                return _make_result(deal)
+            
             status = "UNKNOWN"
             if actual_profit is not None:
                 if actual_profit == 0.0:
@@ -504,14 +510,14 @@ class PocketOptionDemoExecutor(TradeExecutor):
             
             if deal:
                 if status == "LOSS":
-                    pnl = -float(deal.amount)
+                    pnl = -float(getattr(deal, 'amount', 0.0))
                 elif status == "WIN":
                     # Use deal.profit (net) if available, otherwise fall back to actual_profit
                     pnl = float(getattr(deal, 'profit', actual_profit or 0.0))
                 else:
                     pnl = 0.0
             else:
-                pnl = actual_profit if actual_profit and actual_profit > 0 else 0.0
+                pnl = float(actual_profit) if actual_profit and actual_profit > 0 else 0.0
                 
             print(f"[TRADE-RESULT] Deal {trade_id} closed: status={status}, actual_event_profit={actual_profit}, expected_profit={getattr(deal, 'profit', None) if deal else None}")
             return TradeResult(
