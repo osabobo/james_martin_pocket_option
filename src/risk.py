@@ -10,18 +10,36 @@ class RiskState:
     pnl: float = 0.0
     consecutive_losses: int = 0
     seen_message_ids: set[str] = field(default_factory=set)
+    seen_signatures: set[str] = field(default_factory=set)
 
 class RiskEngine:
     def __init__(self):
         self.state = RiskState()
 
     def approve(self, signal: Signal) -> tuple[bool, str]:
+        # Reset state if a new day has started
+        today = date.today()
+        if self.state.day != today:
+            self.state = RiskState(day=today)
+
         if signal.telegram_message_id and signal.telegram_message_id in self.state.seen_message_ids:
             return False, "duplicate_signal"
+            
+        # Deduplicate signals arriving from different sources or during schedule delays
+        signature = f"{signal.asset}_{signal.direction.value}_{signal.expiry_seconds}_{signal.signal_time}"
+        if signature in self.state.seen_signatures:
+            return False, "duplicate_signal"
+            
         if self.state.pnl <= -abs(settings.max_daily_loss):
             return False, "daily_loss_limit"
         if self.state.consecutive_losses >= settings.max_consecutive_losses:
             return False, "consecutive_loss_limit"
+            
+        # Mark as seen immediately upon approval to block concurrent duplicates
+        if signal.telegram_message_id:
+            self.state.seen_message_ids.add(signal.telegram_message_id)
+        self.state.seen_signatures.add(signature)
+        
         return True, "approved"
 
     def make_request(self, signal: Signal) -> TradeRequest:

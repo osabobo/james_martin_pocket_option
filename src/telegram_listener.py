@@ -256,6 +256,11 @@ async def main():
             except Exception as e:
                 print(f"[FORWARDER] Error forwarding message: {e}")
         
+        ok, reason = risk.approve(signal)
+        if not ok:
+            print({"event": "signal_rejected", "reason": reason})
+            return
+            
         if signal.signal_time:
             now_utc = datetime.datetime.now(datetime.timezone.utc)
             parts = list(map(int, signal.signal_time.split(':')))
@@ -311,11 +316,6 @@ async def main():
                 print(f"[WARNING] Signal time is unresolvable or too far in the past/future! Rejecting trade.")
                 return
 
-        ok, reason = risk.approve(signal)
-        if not ok:
-            print({"event": "signal_rejected", "reason": reason})
-            return
-        
         if settings.allow_martingale:
             max_mg = settings.max_martingale_steps
             print(f"[MARTINGALE] Martingale ENABLED for {signal.asset} (expiry={signal.expiry_seconds}s, max_steps={max_mg})")
