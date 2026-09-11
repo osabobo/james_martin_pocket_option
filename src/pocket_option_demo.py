@@ -310,38 +310,44 @@ class PocketOptionDemoExecutor(TradeExecutor):
             
             status = "UNKNOWN"
             
-            # Primary method: use open_price and close_price
-            if hasattr(deal, 'open_price') and hasattr(deal, 'close_price') and getattr(deal, 'close_price') is not None and getattr(deal, 'close_price') != 0.0:
-                if hasattr(deal.command, 'name'):
-                    command_str = str(deal.command.name).lower()
-                else:
-                    command_str = str(deal.command).lower()
-                
-                if command_str in ("call", "0", "dealaction.call"):
-                    if deal.close_price > deal.open_price:
-                        status = "WIN"
-                    elif deal.close_price < deal.open_price:
-                        status = "LOSS"
-                    else:
-                        status = "TIE"
-                elif command_str in ("put", "1", "dealaction.put"):
-                    if deal.close_price < deal.open_price:
-                        status = "WIN"
-                    elif deal.close_price > deal.open_price:
-                        status = "LOSS"
-                    else:
-                        status = "TIE"
-            
-            # Fallback method: use the profit field directly
-            if status == "UNKNOWN" and expected_profit is not None:
+            # Primary method: use the explicit profit field if it is definitively positive or negative
+            if expected_profit is not None:
                 try:
                     p = float(expected_profit)
                     if p < 0:
                         status = "LOSS"
-                    elif p == 0:
-                        status = "LOSS" # Pocket Option often returns profit=0 for loss (payout=0)
-                    else:
+                    elif p > 0:
                         status = "WIN"
+                except (ValueError, TypeError):
+                    pass
+
+            # Fallback method: use open_price and close_price (especially needed for profit=0 to distinguish TIE from LOSS)
+            if status == "UNKNOWN" and hasattr(deal, 'open_price') and hasattr(deal, 'close_price') and getattr(deal, 'close_price') is not None and getattr(deal, 'close_price') != 0.0:
+                if deal.close_price == deal.open_price:
+                    status = "TIE"
+                else:
+                    if hasattr(deal.command, 'name'):
+                        command_str = str(deal.command.name).lower()
+                    else:
+                        command_str = str(deal.command).lower()
+                    
+                    if command_str in ("call", "0", "dealaction.call"):
+                        if deal.close_price > deal.open_price:
+                            status = "WIN"
+                        elif deal.close_price < deal.open_price:
+                            status = "LOSS"
+                    elif command_str in ("put", "1", "dealaction.put"):
+                        if deal.close_price < deal.open_price:
+                            status = "WIN"
+                        elif deal.close_price > deal.open_price:
+                            status = "LOSS"
+            
+            # Ultimate fallback if still unknown and profit=0
+            if status == "UNKNOWN" and expected_profit is not None:
+                try:
+                    p = float(expected_profit)
+                    if p == 0:
+                        status = "LOSS" # Assume loss if profit is 0 and prices didn't indicate a tie
                 except (ValueError, TypeError):
                     pass
             
